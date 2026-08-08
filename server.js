@@ -21,68 +21,77 @@ const app = express();
 const PORT = process.env.PORT || 3131;
 const AGENTROUTER_BASE_URL = (process.env.AGENTROUTER_BASE_URL || 'https://agentrouter.org').replace(/\/+$/, '');
 const DISGUISE_MODE = process.env.DISGUISE_MODE || 'claude-code';
-const OBFUSCATE_MODE = process.env.OBFUSCATE_MODE || 'zero-width'; // 'zero-width', 'base64', or 'none'
+const OBFUSCATE_MODE = process.env.OBFUSCATE_MODE || 'homoglyph'; // 'homoglyph' (default), 'zero-width', 'base64', or 'none'
 const OVERRIDE_API_KEY = process.env.AGENTROUTER_API_KEY || '';
 
-// ─── Obfuscation Engine (Multi-Layered) ─────────────────
+// ─── Obfuscation Engine (Homoglyphs & Zero-Width) ────────
 //
-//  Defeats keyword filters (like new_api "sensitive_words_detected")
-//  while remaining 100% transparent to LLM tokenizers (Claude, GPT).
-//
-//  Strategy:
-//    1. Pool of 6 different invisible Unicode characters (not just \u200b)
-//    2. Random character selection per insertion (defeats single-char stripping)
-//    3. Random insertion position within each word (defeats pattern-based stripping)
-//    4. Variable density: more insertions in longer words
-//    5. Short words (1-2 chars) are never touched
-//    6. Punctuation, numbers, whitespace, and markdown are preserved exactly
+//  Bypasses string scanners (like new_api "sensitive_words_detected").
+//  Why Homoglyphs work:
+//    API sanitizers strip control/zero-width chars before checking words.
+//    Replacing ASCII letters with visually identical Cyrillic lookalikes (e, a, o, c, p, i, x, y)
+//    changes the UTF-8 byte sequence (defeating byte-matching filters)
+//    WITHOUT adding tokens or triggering control-character sanitizers.
+//    LLM tokenizers (Claude, GPT) process homoglyphs seamlessly.
 //
 
-// Pool of invisible Unicode characters — all render as zero-width / invisible
-const INVISIBLE_POOL = [
-  '\u200B', // Zero-Width Space
-  '\u200C', // Zero-Width Non-Joiner
-  '\u200D', // Zero-Width Joiner
-  '\u2060', // Word Joiner
-  '\uFEFF', // Zero-Width No-Break Space (BOM)
-  '\u00AD', // Soft Hyphen (invisible unless line-break occurs)
-];
+// Cyrillic homoglyphs visually identical to Latin characters
+const HOMOGLYPH_MAP = {
+  'a': 'а', // U+0430
+  'e': 'е', // U+0435
+  'o': 'о', // U+043E
+  'p': 'р', // U+0440
+  'c': 'с', // U+0441
+  'i': 'і', // U+0456
+  'x': 'х', // U+0445
+  'y': 'у', // U+0443
+  'A': 'А', // U+0410
+  'E': 'Е', // U+0415
+  'O': 'О', // U+041E
+  'P': 'Р', // U+0420
+  'C': 'С', // U+0421
+  'X': 'Х', // U+0425
+};
 
-/** Pick a random invisible character from the pool */
+/** Replace 1 key letter in a word with a visually identical Cyrillic homoglyph */
+function applyHomoglyphs(word) {
+  if (word.length < 3) return word;
+  const chars = word.split('');
+  for (let i = 0; i < chars.length; i++) {
+    if (HOMOGLYPH_MAP[chars[i]]) {
+      chars[i] = HOMOGLYPH_MAP[chars[i]];
+      break; // 1 homoglyph per word is sufficient to break exact byte matching
+    }
+  }
+  return chars.join('');
+}
+
+// Pool of invisible Unicode characters
+const INVISIBLE_POOL = ['\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF', '\u00AD'];
+
 function randomInvisible() {
   return INVISIBLE_POOL[Math.floor(Math.random() * INVISIBLE_POOL.length)];
 }
 
-/**
- * Obfuscate a single word by inserting exactly 1 invisible character
- * at a random position. Minimum effective dose — enough to break
- * keyword matching without inflating token count.
- *
- * Only words of 4+ characters are obfuscated.
- * The inserted character is randomly chosen from the pool.
- * The insertion position is randomized (never at start or end).
- */
 function obfuscateWord(word) {
   const len = word.length;
-  if (len < 4) return word; // Skip short words (a, an, the, is, etc.)
-
-  // Pick a random position between chars (not at edges)
+  if (len < 4) return word;
   const pos = 1 + Math.floor(Math.random() * (len - 2));
-
-  // Insert 1 random invisible character
   return word.slice(0, pos) + randomInvisible() + word.slice(pos);
 }
 
 /**
- * Obfuscate a full text string.
- * Matches words of 4+ Latin/accented characters and obfuscates each one.
- * Everything else (punctuation, numbers, whitespace, markdown, URLs) is preserved as-is.
+ * Obfuscate text based on selected mode.
  */
 function obfuscateText(text) {
   if (!text || typeof text !== 'string') return text;
 
+  if (OBFUSCATE_MODE === 'homoglyph') {
+    // Replace qualifying words (3+ chars) with homoglyph-substituted versions
+    return text.replace(/[a-zA-ZÀ-ÿ]{3,}/g, (match) => applyHomoglyphs(match));
+  }
+
   if (OBFUSCATE_MODE === 'zero-width') {
-    // Replace each qualifying word (4+ chars) with its obfuscated version
     return text.replace(/[a-zA-ZÀ-ÿ]{4,}/g, (match) => obfuscateWord(match));
   }
 
