@@ -54,59 +54,36 @@ function randomInvisible() {
 }
 
 /**
- * Obfuscate a single word by inserting invisible characters at random positions.
+ * Obfuscate a single word by inserting exactly 1 invisible character
+ * at a random position. Minimum effective dose — enough to break
+ * keyword matching without inflating token count.
  *
- *   Word length 3-5:  1 invisible char inserted
- *   Word length 6-9:  2 invisible chars inserted
- *   Word length 10+:  3 invisible chars inserted
- *
- * Insertion positions are randomized between characters (never at start/end).
- * Each insertion uses a randomly chosen invisible character from the pool.
+ * Only words of 4+ characters are obfuscated.
+ * The inserted character is randomly chosen from the pool.
+ * The insertion position is randomized (never at start or end).
  */
 function obfuscateWord(word) {
   const len = word.length;
-  if (len < 3) return word; // Never touch tiny words
+  if (len < 4) return word; // Skip short words (a, an, the, is, etc.)
 
-  // Decide how many invisible chars to insert
-  const numInsertions = len < 6 ? 1 : len < 10 ? 2 : 3;
+  // Pick a random position between chars (not at edges)
+  const pos = 1 + Math.floor(Math.random() * (len - 2));
 
-  // Collect all valid insertion positions (between characters)
-  // Position i means "insert between char[i-1] and char[i]"
-  const validPositions = [];
-  for (let i = 1; i < len; i++) {
-    validPositions.push(i);
-  }
-
-  // Pick unique random positions
-  const chosen = new Set();
-  while (chosen.size < numInsertions && chosen.size < validPositions.length) {
-    const idx = Math.floor(Math.random() * validPositions.length);
-    chosen.add(validPositions[idx]);
-  }
-
-  // Sort descending so splicing doesn't shift subsequent indices
-  const sortedPositions = [...chosen].sort((a, b) => b - a);
-
-  // Build result by inserting invisible chars
-  const chars = word.split('');
-  for (const pos of sortedPositions) {
-    chars.splice(pos, 0, randomInvisible());
-  }
-
-  return chars.join('');
+  // Insert 1 random invisible character
+  return word.slice(0, pos) + randomInvisible() + word.slice(pos);
 }
 
 /**
  * Obfuscate a full text string.
- * Matches words of 3+ Latin/accented characters and obfuscates each one.
+ * Matches words of 4+ Latin/accented characters and obfuscates each one.
  * Everything else (punctuation, numbers, whitespace, markdown, URLs) is preserved as-is.
  */
 function obfuscateText(text) {
   if (!text || typeof text !== 'string') return text;
 
   if (OBFUSCATE_MODE === 'zero-width') {
-    // Replace each qualifying word with its obfuscated version
-    return text.replace(/[a-zA-ZÀ-ÿ]{3,}/g, (match) => obfuscateWord(match));
+    // Replace each qualifying word (4+ chars) with its obfuscated version
+    return text.replace(/[a-zA-ZÀ-ÿ]{4,}/g, (match) => obfuscateWord(match));
   }
 
   if (OBFUSCATE_MODE === 'base64') {
@@ -145,6 +122,13 @@ function processRequestBody(body) {
   if (!body || OBFUSCATE_MODE === 'none') return body;
 
   const cloned = JSON.parse(JSON.stringify(body));
+
+  // ── Enforce minimum max_tokens for long responses ──
+  // JanitorAI sometimes sends low max_tokens values, causing short replies.
+  const MIN_MAX_TOKENS = 4096;
+  if (!cloned.max_tokens || cloned.max_tokens < MIN_MAX_TOKENS) {
+    cloned.max_tokens = MIN_MAX_TOKENS;
+  }
 
   if (Array.isArray(cloned.messages)) {
     // For base64 mode, prepend a system instruction so the LLM knows to decode
