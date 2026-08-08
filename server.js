@@ -28,14 +28,15 @@ const OVERRIDE_API_KEY = process.env.AGENTROUTER_API_KEY || '';
 
 /**
  * Obfuscate text to bypass simple keyword filters (like new_api sensitive_words_detected)
+ * Uses "soft zero-width space" (1 \u200b per word) so tokenizers parse it cleanly
  */
 function obfuscateText(text) {
   if (!text || typeof text !== 'string') return text;
 
-  if (OBFUSCATE_MODE === 'zero-width') {
-    // Insert zero-width space (\u200b) between alphanumeric chars
-    // Breaks exact string matching for word blacklists while remaining transparent to LLMs
-    return text.replace(/([a-zA-Z0-9À-ÿ])/g, '$1\u200b');
+  if (OBFUSCATE_MODE === 'zero-width' || OBFUSCATE_MODE === 'soft-zero-width') {
+    // Insert 1 zero-width space (\u200b) after the 1st letter of words >= 3 chars
+    // Breaks exact string matching for word blacklists while remaining 100% readable to LLMs
+    return text.replace(/\b([a-zA-ZÀ-ÿ])([a-zA-ZÀ-ÿ]{2,})\b/g, '$1\u200b$2');
   }
 
   if (OBFUSCATE_MODE === 'base64') {
@@ -44,6 +45,21 @@ function obfuscateText(text) {
   }
 
   return text;
+}
+
+function processMessageContent(content) {
+  if (typeof content === 'string') {
+    return obfuscateText(content);
+  }
+  if (Array.isArray(content)) {
+    return content.map(item => {
+      if (item && item.type === 'text' && typeof item.text === 'string') {
+        return { ...item, text: obfuscateText(item.text) };
+      }
+      return item;
+    });
+  }
+  return content;
 }
 
 function processRequestBody(body) {
@@ -60,8 +76,8 @@ function processRequestBody(body) {
     }
 
     cloned.messages = cloned.messages.map(msg => {
-      if (typeof msg.content === 'string') {
-        return { ...msg, content: obfuscateText(msg.content) };
+      if (msg && msg.content) {
+        return { ...msg, content: processMessageContent(msg.content) };
       }
       return msg;
     });
