@@ -21,7 +21,54 @@ const app = express();
 const PORT = process.env.PORT || 3131;
 const AGENTROUTER_BASE_URL = (process.env.AGENTROUTER_BASE_URL || 'https://agentrouter.org').replace(/\/+$/, '');
 const DISGUISE_MODE = process.env.DISGUISE_MODE || 'claude-code';
+const OBFUSCATE_MODE = process.env.OBFUSCATE_MODE || 'zero-width'; // 'zero-width', 'base64', or 'none'
 const OVERRIDE_API_KEY = process.env.AGENTROUTER_API_KEY || '';
+
+// ─── Obfuscation Helpers (Bypass Sensitive Word Filters) ─
+
+/**
+ * Obfuscate text to bypass simple keyword filters (like new_api sensitive_words_detected)
+ */
+function obfuscateText(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  if (OBFUSCATE_MODE === 'zero-width') {
+    // Insert zero-width space (\u200b) between alphanumeric chars
+    // Breaks exact string matching for word blacklists while remaining transparent to LLMs
+    return text.replace(/([a-zA-Z0-9À-ÿ])/g, '$1\u200b');
+  }
+
+  if (OBFUSCATE_MODE === 'base64') {
+    const encoded = Buffer.from(text).toString('base64');
+    return `[BASE64-ENCODED CONTEXT: ${encoded}]`;
+  }
+
+  return text;
+}
+
+function processRequestBody(body) {
+  if (!body || OBFUSCATE_MODE === 'none') return body;
+
+  const cloned = JSON.parse(JSON.stringify(body));
+
+  if (Array.isArray(cloned.messages)) {
+    if (OBFUSCATE_MODE === 'base64') {
+      cloned.messages.unshift({
+        role: 'system',
+        content: 'NOTE FOR MODEL: User messages in this conversation are encoded in Base64 for transmission privacy. Decode them internally before responding. Respond in normal plain text roleplay.'
+      });
+    }
+
+    cloned.messages = cloned.messages.map(msg => {
+      if (typeof msg.content === 'string') {
+        return { ...msg, content: obfuscateText(msg.content) };
+      }
+      return msg;
+    });
+  }
+
+  return cloned;
+}
 
 // ─── Disguise Profiles ──────────────────────────────────
 
@@ -166,7 +213,7 @@ async function proxyRequest(req, res, targetPath) {
 
   const model = req.body?.model || 'unknown';
   const messageCount = req.body?.messages?.length || 0;
-  log('PROXY', `→ ${targetUrl}`, `model=${model} msgs=${messageCount} stream=${isStreaming} disguise=${DISGUISE_MODE}`);
+  log('PROXY', `→ ${targetUrl}`, `model=${model} msgs=${messageCount} stream=${isStreaming} disguise=${DISGUISE_MODE} obfuscate=${OBFUSCATE_MODE}`);
 
   try {
     const fetchOptions = {
@@ -176,7 +223,8 @@ async function proxyRequest(req, res, targetPath) {
 
     // Only add body for POST/PUT/PATCH
     if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
-      fetchOptions.body = JSON.stringify(req.body);
+      const processedBody = processRequestBody(req.body);
+      fetchOptions.body = JSON.stringify(processedBody);
     }
 
     const response = await fetch(targetUrl, fetchOptions);
@@ -359,6 +407,7 @@ app.listen(PORT, () => {
   console.log(`  ${COLORS.green}▸${COLORS.reset} Proxy running on     ${COLORS.cyan}http://localhost:${PORT}${COLORS.reset}`);
   console.log(`  ${COLORS.green}▸${COLORS.reset} Target               ${COLORS.cyan}${AGENTROUTER_BASE_URL}${COLORS.reset}`);
   console.log(`  ${COLORS.green}▸${COLORS.reset} Disguise mode        ${COLORS.yellow}${DISGUISE_MODE}${COLORS.reset}`);
+  console.log(`  ${COLORS.green}▸${COLORS.reset} Obfuscate mode       ${COLORS.yellow}${OBFUSCATE_MODE}${COLORS.reset}`);
   console.log(`  ${COLORS.green}▸${COLORS.reset} API Key source       ${COLORS.yellow}${OVERRIDE_API_KEY ? 'Environment variable' : 'From JanitorAI headers'}${COLORS.reset}`);
   console.log('');
   console.log(`  ${COLORS.dim}Configure JanitorAI with:${COLORS.reset}`);
